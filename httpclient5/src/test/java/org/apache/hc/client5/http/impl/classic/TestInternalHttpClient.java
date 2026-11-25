@@ -34,12 +34,15 @@ import org.apache.hc.client5.http.ClientProtocolException;
 import org.apache.hc.client5.http.HttpRoute;
 import org.apache.hc.client5.http.auth.AuthSchemeFactory;
 import org.apache.hc.client5.http.auth.CredentialsProvider;
+import org.apache.hc.client5.http.classic.ExecChain;
 import org.apache.hc.client5.http.classic.ExecChainHandler;
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.cookie.CookieSpecFactory;
 import org.apache.hc.client5.http.cookie.CookieStore;
+import org.apache.hc.client5.http.io.ConnectionEndpoint;
 import org.apache.hc.client5.http.io.HttpClientConnectionManager;
+import org.apache.hc.client5.http.io.LeaseRequest;
 import org.apache.hc.client5.http.protocol.HttpClientContext;
 import org.apache.hc.client5.http.routing.HttpRoutePlanner;
 import org.apache.hc.core5.http.HttpException;
@@ -47,6 +50,8 @@ import org.apache.hc.core5.http.HttpHost;
 import org.apache.hc.core5.http.config.Lookup;
 import org.apache.hc.core5.http.impl.io.HttpRequestExecutor;
 import org.apache.hc.core5.http.message.BasicClassicHttpResponse;
+import org.apache.hc.core5.io.CloseMode;
+import org.apache.hc.core5.util.TimeValue;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -209,6 +214,92 @@ public class TestInternalHttpClient {
         Assertions.assertSame(localCookieStore, context.getCookieStore());
         Assertions.assertSame(localCredentialsProvider, context.getCredentialsProvider());
         Assertions.assertSame(localConfig, context.getRequestConfig());
+    }
+
+    /**
+     * Stubs the connection manager so that {@code ExecRuntime#acquireEndpoint} hands out the
+     * returned endpoint mock and returns it for later verification.
+     */
+    private ConnectionEndpoint stubEndpointLease() throws Exception {
+        final ConnectionEndpoint endpoint = Mockito.mock(ConnectionEndpoint.class);
+        final LeaseRequest leaseRequest = Mockito.mock(LeaseRequest.class);
+        Mockito.when(connManager.lease(
+                Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any())).thenReturn(leaseRequest);
+        Mockito.when(leaseRequest.get(Mockito.any())).thenReturn(endpoint);
+        return endpoint;
+    }
+
+    /**
+     * Makes the execution chain lease a connection off the exec runtime and then blow up
+     * with the given exception, the way a message handler failing mid-exchange would.
+     */
+    private void stubExecChainFailureAfterEndpointAcquired(
+            final HttpRoute route, final Exception ex) throws Exception {
+        Mockito.when(execChain.execute(
+                Mockito.any(), Mockito.any(), Mockito.any())).thenAnswer(invocation -> {
+                    final ExecChain.Scope scope = invocation.getArgument(1);
+                    scope.execRuntime.acquireEndpoint("test", route, null, scope.clientContext);
+                    throw ex;
+                });
+    }
+
+    private void assertEndpointDiscarded(final ConnectionEndpoint endpoint) {
+        Mockito.verify(endpoint).close(CloseMode.IMMEDIATE);
+        Mockito.verify(connManager).release(endpoint, null, TimeValue.ZERO_MILLISECONDS);
+    }
+
+    @Test
+    public void testExecuteHttpExceptionDiscardsEndpoint() throws Exception {
+        final HttpGet httpget = new HttpGet("http://somehost/stuff");
+        final HttpRoute route = new HttpRoute(new HttpHost("somehost", 80));
+
+        Mockito.when(routePlanner.determineRoute(
+                Mockito.eq(new HttpHost("somehost")),
+                Mockito.<HttpClientContext>any())).thenReturn(route);
+
+        final ConnectionEndpoint endpoint = stubEndpointLease();
+        stubExecChainFailureAfterEndpointAcquired(route, new HttpException("Ooopsie"));
+
+        Assertions.assertThrows(ClientProtocolException.class, () ->
+                client.execute(httpget, response -> null));
+
+        assertEndpointDiscarded(endpoint);
+    }
+
+    @Test
+    public void testExecuteIOExceptionDiscardsEndpoint() throws Exception {
+        final HttpGet httpget = new HttpGet("http://somehost/stuff");
+        final HttpRoute route = new HttpRoute(new HttpHost("somehost", 80));
+
+        Mockito.when(routePlanner.determineRoute(
+                Mockito.eq(new HttpHost("somehost")),
+                Mockito.<HttpClientContext>any())).thenReturn(route);
+
+        final ConnectionEndpoint endpoint = stubEndpointLease();
+        stubExecChainFailureAfterEndpointAcquired(route, new IOException("Ooopsie"));
+
+        Assertions.assertThrows(IOException.class, () ->
+                client.execute(httpget, response -> null));
+
+        assertEndpointDiscarded(endpoint);
+    }
+
+    @Test
+    public void testExecuteRuntimeExceptionDiscardsEndpoint() throws Exception {
+        final HttpGet httpget = new HttpGet("http://somehost/stuff");
+        final HttpRoute route = new HttpRoute(new HttpHost("somehost", 80));
+
+        Mockito.when(routePlanner.determineRoute(
+                Mockito.eq(new HttpHost("somehost")),
+                Mockito.<HttpClientContext>any())).thenReturn(route);
+
+        final ConnectionEndpoint endpoint = stubEndpointLease();
+        stubExecChainFailureAfterEndpointAcquired(route, new IllegalStateException("Ooopsie"));
+
+        Assertions.assertThrows(IllegalStateException.class, () ->
+                client.execute(httpget, response -> null));
+
+        assertEndpointDiscarded(endpoint);
     }
 
     @Test

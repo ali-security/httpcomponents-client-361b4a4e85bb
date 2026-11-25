@@ -202,7 +202,7 @@ public class TestContentCompressionExec {
     @Test
     public void testUnknownContentEncoding() throws Exception {
         final ClassicHttpRequest request = new BasicClassicHttpRequest(Method.GET, host, "/");
-        final ClassicHttpResponse response = new BasicClassicHttpResponse(200, "OK");
+        final ClassicHttpResponse response = Mockito.spy(new BasicClassicHttpResponse(200, "OK"));
         final HttpEntity original = EntityBuilder.create().setText("encoded stuff").setContentEncoding("whatever").build();
         response.setEntity(original);
 
@@ -212,6 +212,23 @@ public class TestContentCompressionExec {
 
         Assertions.assertThrows(HttpException.class, () ->
                 impl.execute(request, scope, execChain));
+        Mockito.verify(response).close();
+    }
+
+    @Test
+    public void testRuntimeExceptionClosesResponse() throws Exception {
+        final ClassicHttpRequest request = new BasicClassicHttpRequest(Method.GET, host, "/");
+        final ClassicHttpResponse response = Mockito.spy(new BasicClassicHttpResponse(200, "OK"));
+        final HttpEntity original = Mockito.mock(HttpEntity.class);
+        Mockito.when(original.getContentLength()).thenReturn(-1L);
+        Mockito.when(original.getContentEncoding()).thenThrow(new IllegalStateException("Boom"));
+        response.setEntity(original);
+
+        Mockito.when(execChain.proceed(request, scope)).thenReturn(response);
+
+        Assertions.assertThrows(IllegalStateException.class, () ->
+                impl.execute(request, scope, execChain));
+        Mockito.verify(response).close();
     }
 
     @Test
