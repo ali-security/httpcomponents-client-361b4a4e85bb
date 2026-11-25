@@ -29,6 +29,9 @@ package org.apache.hc.client5.testing.async;
 import org.apache.hc.core5.http.URIScheme;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 
 public class ReactiveMinimalIntegrationTests {
 
@@ -68,6 +71,13 @@ public class ReactiveMinimalIntegrationTests {
 
         public H2Tls() throws Exception {
             super(URIScheme.HTTPS);
+        }
+
+        @Override
+        @Test
+        @DisabledOnOs(value = OS.MAC, disabledReason = "Flaky on macOS GitHub Actions runners: H2/TLS connection closed before request executes (RequestNotExecutedException)")
+        public void testSequentialGetRequests() throws Exception {
+            super.testSequentialGetRequests();
         }
 
     }

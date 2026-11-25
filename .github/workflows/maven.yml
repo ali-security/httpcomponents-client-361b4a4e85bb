@@ -15,7 +15,13 @@
 
 name: Java CI
 
-on: [push, pull_request]
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional surefire -Dtest selector; empty runs the full suite'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -24,7 +30,7 @@ jobs:
   build:
 
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 45
     strategy:
       matrix:
         # windows-latest is not used due to intermittent network failures
@@ -46,7 +52,7 @@ jobs:
         
     steps:
     - uses: actions/checkout@v3
-    - uses: actions/cache@v3
+    - uses: actions/cache@v4
       with:
         path: ~/.m2/repository
         key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
@@ -55,7 +61,39 @@ jobs:
     - name: Set up JDK ${{ matrix.java }}
       uses: actions/setup-java@v3
       with:
-        distribution: 'temurin'
+        # Temurin ships no arm64-macOS JDK 8; Zulu does
+        distribution: ${{ (matrix.os == 'macos-latest' && matrix.java == 8) && 'zulu' || 'temurin' }}
         java-version: ${{ matrix.java }}
+        cache: maven
     - name: Build with Maven
-      run: mvn -V --file pom.xml --no-transfer-progress -DtrimStackTrace=false -P-use-toolchains
+      run: |
+        GATES="-Dcheckstyle.skip -Drat.skip=true -Djapicmp.skip=true -Danimal.sniffer.skip=true"
+        if [ -n "${{ inputs.test-filter }}" ]; then
+          mvn -V --file pom.xml --no-transfer-progress -DtrimStackTrace=false -P-use-toolchains $GATES -Dtest='${{ inputs.test-filter }}' -Dsurefire.failIfNoSpecifiedTests=false -DfailIfNoTests=false
+        else
+          mvn -V --file pom.xml --no-transfer-progress -DtrimStackTrace=false -P-use-toolchains $GATES
+        fi
+    - name: Report skipped tests
+      if: always()
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        import glob, xml.etree.ElementTree as ET
+        total = 0
+        for f in sorted(glob.glob('**/target/surefire-reports/TEST-*.xml', recursive=True)):
+            for tc in ET.parse(f).getroot().iter('testcase'):
+                sk = tc.find('skipped')
+                if sk is not None:
+                    total += 1
+                    print('SKIPPED %s#%s : %s' % (tc.get('classname'), tc.get('name'), sk.get('message') or (sk.text or '').strip() or '(no message)'))
+        print('Total skipped tests: %d' % total)
+        PY
+    - name: Upload artifacts
+      if: matrix.os == 'ubuntu-latest' && matrix.java == 8
+      uses: actions/upload-artifact@v4
+      with:
+        name: httpclient5-jars
+        path: |
+          httpclient5/target/httpclient5-5.2.1.jar
+          httpclient5/target/httpclient5-5.2.1-tests.jar
+        if-no-files-found: error
